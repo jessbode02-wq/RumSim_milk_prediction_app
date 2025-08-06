@@ -1,0 +1,4 @@
+nicegui==2.22.1        # or latest stable version (e.g., 2.2x)
+joblib
+pandas                  # if used in future
+scikit-learn            # required for joblib-loaded sklearn model
