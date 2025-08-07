@@ -4042,182 +4042,185 @@ MODEL_FILE = Path(__file__).with_name("optimized_model_MLP.pkl")
 model = joblib.load(MODEL_FILE)
 
 # -------------------- UI LAYOUT ---------------
-ui.label("RumenSim: Predicting Dairy Cow Performance with Precision").classes(
-    "text-2xl font-bold mt-4"
-)
-
-ingredient_select = ui.select(
-    options=list(nutrient_profiles.keys()),
-    label="Select Ingredients",
-    multiple=True,
-)
-
-# FULL-WIDTH container fixes slider growing issue
-slider_container = ui.column().classes("mt-2 w-full")
-
-# -------------------- DYNAMIC SLIDERS --------
-def rebuild_sliders():
-    slider_container.clear()
-    sliders.clear()
-    for ing in ingredient_select.value or []:
-        sid = sanitize(ing)
-        with slider_container:
-            ui.label(f"{ing} (% of total diet)")
-            with ui.row().classes("items-center w-full"):
-                slider = ui.slider(min=0, max=100, value=0, step=1).classes(
-                    "flex-1 w-full"
-                )
-                value_lbl = ui.label("0 %")
-                slider.on(
-                    "update:model-value",
-                    lambda e, s=slider, lbl=value_lbl: lbl.set_text(f"{s.value} %"),
-                )
-            sliders[sid] = slider
-
-ingredient_select.on("update:model-value", lambda _: rebuild_sliders())
-
-# -------------------- STATIC INPUTS ----------
-ui.label("Body Weight (kg)")
-with ui.row().classes("items-center w-full"):
-    body_weight = ui.slider(min=400, max=800, value=600, step=1).classes("flex-1 w-full")
-    bw_lbl = ui.label("600 kg")
-    body_weight.on("update:model-value", lambda e: bw_lbl.set_text(f"{body_weight.value} kg"))
-
-ui.label("Dry Matter Intake (kg/d)")
-with ui.row().classes("items-center w-full"):
-    feed_intake = ui.slider(min=12, max=30, value=22, step=0.1).classes("flex-1 w-full")
-    dmi_lbl = ui.label("22.0 kg")
-    feed_intake.on("update:model-value", lambda e: dmi_lbl.set_text(f"{feed_intake.value:.1f} kg"))
-
-# -------------------- OUTPUT -----------------
-result_label = ui.label()
-prediction_label = ui.label().classes("font-semibold")
-
-# -------------------- BACK END ---------------
-def calculate_totals():
-    if not ingredient_select.value:
-        result_label.set_text("Select ingredients first.")
-        return None
-    total_pct = sum(s.value for s in sliders.values())
-    if total_pct != 100:
-        result_label.set_text(f"Error: Total percentage = {total_pct} %. Must equal 100 %.")
-        return None
-    totals = {k: 0.0 for k in next(iter(nutrient_profiles.values())).keys()}
-    for ing in ingredient_select.value:
-        sid = sanitize(ing)
-        frac = sliders[sid].value / 100.0
-        for n, v in nutrient_profiles[ing].items():
-            totals[n] += v * frac
-    target_sum = sum(totals[n] for n in TARGET_NUTRIENTS)
-    if target_sum:
-        scale = 1000 / target_sum
-        for n in TARGET_NUTRIENTS:
-            totals[n] *= scale
-    result_label.set_text("\n".join(f"{k}: {v:.2f}" for k, v in totals.items()))
-    return totals
-
-def predict_milk_yield():
-    totals = calculate_totals()
-    if totals is None:
-        prediction_label.set_text("")
-
-    forage_percent = totals.get("Forage (%)", 0.0)
-    nf_value = 6 if forage_percent > 55 else 7 if forage_percent < 40 else 8
-
-    features = [
-        float(feed_intake.value) * 1000,
-        totals.get("Crude Protein", 0.0) / 6.25,
-        totals.get("Undegraded Protein (g/kg DM)", 0.0),
-        totals.get("Ammonia (g/kg DM)", 0.0),  # Fraction of ammonia taken from calculation
-        totals.get("Soluble Crude Protein (g/kg DM)", 0.0) / 6.25,
-        totals.get("Water-Soluble Carbohydrates (g/kg DM)", 0.0),  # Fraction of WSC taken from calculation
-        totals.get("Soluble Starch (g/kg DM)", 0.0),  # Fraction of soluble starch taken from calculation
-        totals.get("Degradable Starch (g/kg DM)", 0.0),  # Fraction of degradable starch taken from calculation
-        totals.get("Neutral Detergent Fiber (g/kg DM)", 0.0),  # Fraction of total NDF taken from calculation
-        totals.get("undegNDFg", 0.0),  # Fraction of undegradable NDF taken from calculation
-        totals.get("Crude Lipid (g/kg DM)", 0.0),  # Fraction of crude lipid taken from calculation
-        totals.get("Ash (g/kg DM)", 0.0),  # Fraction of ash taken from calculation
-        totals.get("Acetic Acid (g/kg DM)", 0.0),  # Fraction of acetic acid taken from calculation
-        totals.get("Propionic Acid (g/kg DM)", 0.0),  # Fraction of propionic acid taken from calculation
-        totals.get("Butyric Acid (g/kg DM)", 0.0),  # Fraction of butyric acid taken from calculation
-        totals.get("Valeric Acid (g/kg DM)", 0.0),  # Fraction of valeric acid taken from calculation
-        totals.get("Lactic Acid (g/kg DM)", 0.0),  # Fraction of lactic acid taken from calculation
-        totals.get("Rate of NDF Digestion (/h)", 0.0),  # Rate of NDF degredation taken from calculation
-        totals.get("Rate of CP Digestion (/h)", 0.0),  # Rate of crude protein degredation taken from calculation
-        totals.get("Rate of Starch Digestion (/h)", 0.0),  # Rate of starch degredation taken from calculation
-        0.0355,  # Fraction of fat in milk default - average in holstein milk
-        0.0307,  # Fraction of protein in milk default - average in holstein milk
-        0.0473,  # Fraction of lactose in milk default - average in holstein milk
-        nf_value,  # Constant determined by rouphage percent in diet
-        float(body_weight.value),
-    ]
-    y_pred = model.predict([features])[0]
-    prediction_label.set_text(f"Predicted milk yield: {y_pred:.2f} kg/day")
-
-def download_csv() -> None:
-    totals = calculate_totals()
-    if totals is None:
-        return
-    forage_percent = totals.get("Forage (%)", 0.0)
-    nf_value = 6 if forage_percent > 55 else 7 if forage_percent < 40 else 8
-    header = [
-        "RUNAME", "ID", "FEED", "FN", "FRPI", "FRAM", "FSLN", "FRWR", "FRSR", "FRSF",
-        "FNDF", "FRFF", "FRLI", "FRASH", "FRAC", "FRPR", "FRBU", "FRVL", "FRLA",
-        "KFFDI", "KPDDI", "KSFDI", "FRFAT", "FRPRO", "FRLAC", "NF", "FRPE",
-        "BODYWT", "RP", "CONTINUE"]
-    row = [
-        "run_default",  # Default text needed to specify how to run the model
-        "1111",
-        float(feed_intake.value) * 1000,
-        totals.get("Crude Protein", 0.0) / 6.25,
-        totals.get("Undegraded Protein (g/kg DM)", 0.0),
-        totals.get("Ammonia (g/kg DM)", 0.0),  # Fraction of ammonia taken from calculation
-        totals.get("Soluble Crude Protein (g/kg DM)", 0.0) / 6.25,
-        totals.get("Water-Soluble Carbohydrates (g/kg DM)", 0.0),  # Fraction of WSC taken from calculation
-        totals.get("Soluble Starch (g/kg DM)", 0.0),  # Fraction of soluble starch taken from calculation
-        totals.get("Degradable Starch (g/kg DM)", 0.0),  # Fraction of degradable starch taken from calculation
-        totals.get("Neutral Detergent Fiber (g/kg DM)", 0.0),  # Fraction of total NDF taken from calculation
-        totals.get("undegNDFg", 0.0),  # Fraction of undegradable NDF taken from calculation
-        totals.get("Crude Lipid (g/kg DM)", 0.0),  # Fraction of crude lipid taken from calculation
-        totals.get("Ash (g/kg DM)", 0.0),  # Fraction of ash taken from calculation
-        totals.get("Acetic Acid (g/kg DM)", 0.0),  # Fraction of acetic acid taken from calculation
-        totals.get("Propionic Acid (g/kg DM)", 0.0),  # Fraction of propionic acid taken from calculation
-        totals.get("Butyric Acid (g/kg DM)", 0.0),  # Fraction of butyric acid taken from calculation
-        totals.get("Valeric Acid (g/kg DM)", 0.0),  # Fraction of valeric acid taken from calculation
-        totals.get("Lactic Acid (g/kg DM)", 0.0),  # Fraction of lactic acid taken from calculation
-        totals.get("Rate of NDF Digestion (/h)", 0.0),  # Rate of NDF degredation taken from calculation
-        totals.get("Rate of CP Digestion (/h)", 0.0),  # Rate of crude protein degredation taken from calculation
-        totals.get("Rate of Starch Digestion (/h)", 0.0),  # Rate of starch degredation taken from calculation
-        0.0355,  # Fraction of fat in milk default - average in holstein milk
-        0.0307,  # Fraction of protein in milk default - average in holstein milk
-        0.0473,  # Fraction of lactose in milk default - average in holstein milk
-        nf_value,  # Constant determined by rouphage percent in diet
-        0.0,  # Pectin in diet set a 0 - included in soluble nitrogen calculation
-        float(body_weight.value),
-        forage_percent,
-        "c"
-    ]
-    buf = StringIO()
-    writer = csv.writer(buf, lineterminator="\n")   # use LF line endings
-    writer.writerow(header)
-    writer.writerow(row)
-    csv_text = buf.getvalue()
-
-    # --- trigger download -----------------------------------
-    csv_bytes = csv_text.encode('utf-8')
-    ui.download(
-        csv_bytes,
-        filename="nutrient_breakdown.csv",
+@ui.page('/')
+def main_page():
+    sliders: dict[str, ui.slider] = {}
+    ui.label("RumenSim: Predicting Dairy Cow Performance with Precision").classes(
+        "text-2xl font-bold mt-4"
     )
-
-    # optional confirmation
-    result_label.set_text("CSV downloaded ✓")
-
-# -------------------- BUTTONS ----------------
-ui.button("Calculate Nutrient Breakdown", on_click=calculate_totals)
-ui.button("Run ML Model to Predict Milk Yield", on_click=predict_milk_yield)
-ui.label().bind_text_from(prediction_label, "text")
-ui.button("Download CSV", on_click=download_csv)
+    
+    ingredient_select = ui.select(
+        options=list(nutrient_profiles.keys()),
+        label="Select Ingredients",
+        multiple=True,
+    )
+    
+    # FULL-WIDTH container fixes slider growing issue
+    slider_container = ui.column().classes("mt-2 w-full")
+    
+    # -------------------- DYNAMIC SLIDERS --------
+    def rebuild_sliders():
+        slider_container.clear()
+        sliders.clear()
+        for ing in ingredient_select.value or []:
+            sid = sanitize(ing)
+            with slider_container:
+                ui.label(f"{ing} (% of total diet)")
+                with ui.row().classes("items-center w-full"):
+                    slider = ui.slider(min=0, max=100, value=0, step=1).classes(
+                        "flex-1 w-full"
+                    )
+                    value_lbl = ui.label("0 %")
+                    slider.on(
+                        "update:model-value",
+                        lambda e, s=slider, lbl=value_lbl: lbl.set_text(f"{s.value} %"),
+                    )
+                sliders[sid] = slider
+    
+    ingredient_select.on("update:model-value", lambda _: rebuild_sliders())
+    
+    # -------------------- STATIC INPUTS ----------
+    ui.label("Body Weight (kg)")
+    with ui.row().classes("items-center w-full"):
+        body_weight = ui.slider(min=400, max=800, value=600, step=1).classes("flex-1 w-full")
+        bw_lbl = ui.label("600 kg")
+        body_weight.on("update:model-value", lambda e: bw_lbl.set_text(f"{body_weight.value} kg"))
+    
+    ui.label("Dry Matter Intake (kg/d)")
+    with ui.row().classes("items-center w-full"):
+        feed_intake = ui.slider(min=12, max=30, value=22, step=0.1).classes("flex-1 w-full")
+        dmi_lbl = ui.label("22.0 kg")
+        feed_intake.on("update:model-value", lambda e: dmi_lbl.set_text(f"{feed_intake.value:.1f} kg"))
+    
+    # -------------------- OUTPUT -----------------
+    result_label = ui.label()
+    prediction_label = ui.label().classes("font-semibold")
+    
+    # -------------------- BACK END ---------------
+    def calculate_totals():
+        if not ingredient_select.value:
+            result_label.set_text("Select ingredients first.")
+            return None
+        total_pct = sum(s.value for s in sliders.values())
+        if total_pct != 100:
+            result_label.set_text(f"Error: Total percentage = {total_pct} %. Must equal 100 %.")
+            return None
+        totals = {k: 0.0 for k in next(iter(nutrient_profiles.values())).keys()}
+        for ing in ingredient_select.value:
+            sid = sanitize(ing)
+            frac = sliders[sid].value / 100.0
+            for n, v in nutrient_profiles[ing].items():
+                totals[n] += v * frac
+        target_sum = sum(totals[n] for n in TARGET_NUTRIENTS)
+        if target_sum:
+            scale = 1000 / target_sum
+            for n in TARGET_NUTRIENTS:
+                totals[n] *= scale
+        result_label.set_text("\n".join(f"{k}: {v:.2f}" for k, v in totals.items()))
+        return totals
+    
+    def predict_milk_yield():
+        totals = calculate_totals()
+        if totals is None:
+            prediction_label.set_text("")
+    
+        forage_percent = totals.get("Forage (%)", 0.0)
+        nf_value = 6 if forage_percent > 55 else 7 if forage_percent < 40 else 8
+    
+        features = [
+            float(feed_intake.value) * 1000,
+            totals.get("Crude Protein", 0.0) / 6.25,
+            totals.get("Undegraded Protein (g/kg DM)", 0.0),
+            totals.get("Ammonia (g/kg DM)", 0.0),  # Fraction of ammonia taken from calculation
+            totals.get("Soluble Crude Protein (g/kg DM)", 0.0) / 6.25,
+            totals.get("Water-Soluble Carbohydrates (g/kg DM)", 0.0),  # Fraction of WSC taken from calculation
+            totals.get("Soluble Starch (g/kg DM)", 0.0),  # Fraction of soluble starch taken from calculation
+            totals.get("Degradable Starch (g/kg DM)", 0.0),  # Fraction of degradable starch taken from calculation
+            totals.get("Neutral Detergent Fiber (g/kg DM)", 0.0),  # Fraction of total NDF taken from calculation
+            totals.get("undegNDFg", 0.0),  # Fraction of undegradable NDF taken from calculation
+            totals.get("Crude Lipid (g/kg DM)", 0.0),  # Fraction of crude lipid taken from calculation
+            totals.get("Ash (g/kg DM)", 0.0),  # Fraction of ash taken from calculation
+            totals.get("Acetic Acid (g/kg DM)", 0.0),  # Fraction of acetic acid taken from calculation
+            totals.get("Propionic Acid (g/kg DM)", 0.0),  # Fraction of propionic acid taken from calculation
+            totals.get("Butyric Acid (g/kg DM)", 0.0),  # Fraction of butyric acid taken from calculation
+            totals.get("Valeric Acid (g/kg DM)", 0.0),  # Fraction of valeric acid taken from calculation
+            totals.get("Lactic Acid (g/kg DM)", 0.0),  # Fraction of lactic acid taken from calculation
+            totals.get("Rate of NDF Digestion (/h)", 0.0),  # Rate of NDF degredation taken from calculation
+            totals.get("Rate of CP Digestion (/h)", 0.0),  # Rate of crude protein degredation taken from calculation
+            totals.get("Rate of Starch Digestion (/h)", 0.0),  # Rate of starch degredation taken from calculation
+            0.0355,  # Fraction of fat in milk default - average in holstein milk
+            0.0307,  # Fraction of protein in milk default - average in holstein milk
+            0.0473,  # Fraction of lactose in milk default - average in holstein milk
+            nf_value,  # Constant determined by rouphage percent in diet
+            float(body_weight.value),
+        ]
+        y_pred = model.predict([features])[0]
+        prediction_label.set_text(f"Predicted milk yield: {y_pred:.2f} kg/day")
+    
+    def download_csv() -> None:
+        totals = calculate_totals()
+        if totals is None:
+            return
+        forage_percent = totals.get("Forage (%)", 0.0)
+        nf_value = 6 if forage_percent > 55 else 7 if forage_percent < 40 else 8
+        header = [
+            "RUNAME", "ID", "FEED", "FN", "FRPI", "FRAM", "FSLN", "FRWR", "FRSR", "FRSF",
+            "FNDF", "FRFF", "FRLI", "FRASH", "FRAC", "FRPR", "FRBU", "FRVL", "FRLA",
+            "KFFDI", "KPDDI", "KSFDI", "FRFAT", "FRPRO", "FRLAC", "NF", "FRPE",
+            "BODYWT", "RP", "CONTINUE"]
+        row = [
+            "run_default",  # Default text needed to specify how to run the model
+            "1111",
+            float(feed_intake.value) * 1000,
+            totals.get("Crude Protein", 0.0) / 6.25,
+            totals.get("Undegraded Protein (g/kg DM)", 0.0),
+            totals.get("Ammonia (g/kg DM)", 0.0),  # Fraction of ammonia taken from calculation
+            totals.get("Soluble Crude Protein (g/kg DM)", 0.0) / 6.25,
+            totals.get("Water-Soluble Carbohydrates (g/kg DM)", 0.0),  # Fraction of WSC taken from calculation
+            totals.get("Soluble Starch (g/kg DM)", 0.0),  # Fraction of soluble starch taken from calculation
+            totals.get("Degradable Starch (g/kg DM)", 0.0),  # Fraction of degradable starch taken from calculation
+            totals.get("Neutral Detergent Fiber (g/kg DM)", 0.0),  # Fraction of total NDF taken from calculation
+            totals.get("undegNDFg", 0.0),  # Fraction of undegradable NDF taken from calculation
+            totals.get("Crude Lipid (g/kg DM)", 0.0),  # Fraction of crude lipid taken from calculation
+            totals.get("Ash (g/kg DM)", 0.0),  # Fraction of ash taken from calculation
+            totals.get("Acetic Acid (g/kg DM)", 0.0),  # Fraction of acetic acid taken from calculation
+            totals.get("Propionic Acid (g/kg DM)", 0.0),  # Fraction of propionic acid taken from calculation
+            totals.get("Butyric Acid (g/kg DM)", 0.0),  # Fraction of butyric acid taken from calculation
+            totals.get("Valeric Acid (g/kg DM)", 0.0),  # Fraction of valeric acid taken from calculation
+            totals.get("Lactic Acid (g/kg DM)", 0.0),  # Fraction of lactic acid taken from calculation
+            totals.get("Rate of NDF Digestion (/h)", 0.0),  # Rate of NDF degredation taken from calculation
+            totals.get("Rate of CP Digestion (/h)", 0.0),  # Rate of crude protein degredation taken from calculation
+            totals.get("Rate of Starch Digestion (/h)", 0.0),  # Rate of starch degredation taken from calculation
+            0.0355,  # Fraction of fat in milk default - average in holstein milk
+            0.0307,  # Fraction of protein in milk default - average in holstein milk
+            0.0473,  # Fraction of lactose in milk default - average in holstein milk
+            nf_value,  # Constant determined by rouphage percent in diet
+            0.0,  # Pectin in diet set a 0 - included in soluble nitrogen calculation
+            float(body_weight.value),
+            forage_percent,
+            "c"
+        ]
+        buf = StringIO()
+        writer = csv.writer(buf, lineterminator="\n")   # use LF line endings
+        writer.writerow(header)
+        writer.writerow(row)
+        csv_text = buf.getvalue()
+    
+        # --- trigger download -----------------------------------
+        csv_bytes = csv_text.encode('utf-8')
+        ui.download(
+            csv_bytes,
+            filename="nutrient_breakdown.csv",
+        )
+    
+        # optional confirmation
+        result_label.set_text("CSV downloaded ✓")
+    
+    # -------------------- BUTTONS ----------------
+    ui.button("Calculate Nutrient Breakdown", on_click=calculate_totals)
+    ui.button("Run ML Model to Predict Milk Yield", on_click=predict_milk_yield)
+    ui.label().bind_text_from(prediction_label, "text")
+    ui.button("Download CSV", on_click=download_csv)
 
 # -------------------- RUN APP ----------------
 ui.run()
